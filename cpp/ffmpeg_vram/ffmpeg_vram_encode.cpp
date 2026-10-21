@@ -454,20 +454,30 @@ private:
     }
   }
 
+  // The capturer already renders BT.2020 PQ P010 (Y'CbCr, studio range), so
+  // this is a plain copy into the encoder's frame.
   bool convert_hdr(void *texture, ID3D11Texture2D *p010,
                    const D3D11_TEXTURE2D_DESC &desc) {
     if (desc.Format != DXGI_FORMAT_P010) {
-      LOG_ERROR(std::string("convert_hdr: texture format mismatch, ") +
+      LOG_ERROR(std::string("convert_hdr: encoder texture format mismatch, ") +
                 std::to_string(desc.Format) +
                 " != " + std::to_string(DXGI_FORMAT_P010));
       return false;
     }
-    if (!native_->BgraToNv12((ID3D11Texture2D *)texture, p010, width_, height_,
-                             DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020,
-                             DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020)) {
-      LOG_ERROR(std::string("convert_hdr: RGB10 PQ -> P010 failed"));
+    ID3D11Texture2D *src = (ID3D11Texture2D *)texture;
+    D3D11_TEXTURE2D_DESC src_desc;
+    src->GetDesc(&src_desc);
+    if (src_desc.Format != DXGI_FORMAT_P010 || src_desc.Width != (UINT)width_ ||
+        src_desc.Height != (UINT)height_) {
+      LOG_ERROR(std::string("convert_hdr: input must be P010 ") +
+                std::to_string(width_) + "x" + std::to_string(height_) +
+                ", got format " + std::to_string(src_desc.Format) + " " +
+                std::to_string(src_desc.Width) + "x" +
+                std::to_string(src_desc.Height));
       return false;
     }
+    d3d11DeviceContext_->CopySubresourceRegion(p010, 0, 0, 0, 0, src, 0,
+                                               nullptr);
     return true;
   }
 
