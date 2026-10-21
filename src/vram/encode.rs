@@ -48,6 +48,38 @@ impl Encoder {
         }
     }
 
+    /// HDR10 encoder: NVIDIA HEVC Main10, BT.2020 / PQ. `encode` takes a
+    /// BT.2020 PQ R10G10B10A2_UNORM texture instead of BGRA.
+    pub fn new_hdr(ctx: EncodeContext) -> Result<Self, ()> {
+        init_av_log();
+        if ctx.d.width % 2 == 1 || ctx.d.height % 2 == 1 {
+            return Err(());
+        }
+        if ctx.f.driver != FFMPEG {
+            return Err(());
+        }
+        unsafe {
+            let codec = ffmpeg::ffmpeg_vram_new_encoder_hdr(
+                ctx.d.device.unwrap_or(std::ptr::null_mut()),
+                ctx.f.luid,
+                ctx.f.data_format as i32,
+                ctx.d.width,
+                ctx.d.height,
+                ctx.d.kbitrate,
+                ctx.d.framerate,
+                ctx.d.gop,
+            );
+            if codec.is_null() {
+                return Err(());
+            }
+            Ok(Self {
+                codec,
+                frames: Box::into_raw(Box::new(Vec::<EncodeFrame>::new())),
+                ctx,
+            })
+        }
+    }
+
     pub fn encode(&mut self, tex: *mut c_void, ms: i64) -> Result<&mut Vec<EncodeFrame>, i32> {
         unsafe {
             (&mut *self.frames).clear();

@@ -86,9 +86,12 @@ public:
   const int align_ = 0;
   const bool full_range_ = false;
   const bool bt709_ = false;
+  // HDR10: input is BT.2020 PQ R10G10B10A2, encoded as HEVC Main10 from P010.
+  bool hdr_ = false;
   FFmpegVRamEncoder(void *handle, int64_t luid, DataFormat dataFormat,
                     int32_t width, int32_t height, int32_t kbs,
-                    int32_t framerate, int32_t gop) {
+                    int32_t framerate, int32_t gop, bool hdr = false) {
+    hdr_ = hdr;
     handle_ = handle;
     luid_ = luid;
     dataFormat_ = dataFormat;
@@ -142,6 +145,17 @@ public:
     // util_encode::set_quality(c_->priv_data, encoder_->name_, Quality_Default);
     util_encode::set_rate_control(c_, encoder_->name_, RC_CBR, -1);
     util_encode::set_others(c_->priv_data, encoder_->name_);
+    if (hdr_) {
+      c_->profile = AV_PROFILE_HEVC_MAIN_10;
+      c_->color_range = AVCOL_RANGE_MPEG;
+      c_->color_primaries = AVCOL_PRI_BT2020;
+      c_->color_trc = AVCOL_TRC_SMPTE2084;
+      c_->colorspace = AVCOL_SPC_BT2020_NCL;
+      if ((ret = av_opt_set(c_->priv_data, "profile", "main10", 0)) < 0) {
+        LOG_ERROR(std::string("set profile main10 failed, ret = ") + av_err2str(ret));
+        return false;
+      }
+    }
 
     hw_device_ctx_ = av_hwdevice_ctx_alloc(encoder_->device_type_);
     if (!hw_device_ctx_) {
@@ -306,6 +320,17 @@ public:
 
 private:
   bool choose_encoder(AdapterVendor vendor) {
+    if (hdr_) {
+      if (ADAPTER_VENDOR_NVIDIA != vendor || dataFormat_ != H265) {
+        LOG_ERROR(std::string("HDR encode needs NVIDIA HEVC, vendor: ") +
+                  std::to_string(vendor) + ", format: " + std::to_string(dataFormat_));
+        return false;
+      }
+      encoder_ = std::make_unique<Encoder>(
+          EncoderDriver::NVENC, "hevc_nvenc", AV_HWDEVICE_TYPE_D3D11VA,
+          AV_HWDEVICE_TYPE_NONE, AV_PIX_FMT_D3D11, AV_PIX_FMT_P010);
+      return true;
+    }
     if (ADAPTER_VENDOR_NVIDIA == vendor) {
       const char *name = nullptr;
       if (dataFormat_ == H264) {
@@ -391,6 +416,9 @@ private:
       ID3D11Texture2D *texture2D = (ID3D11Texture2D *)encode_texture_;
       D3D11_TEXTURE2D_DESC desc;
       texture2D->GetDesc(&desc);
+      if (hdr_) {
+        return convert_hdr(texture, texture2D, desc);
+      }
       if (desc.Format != DXGI_FORMAT_NV12) {
         LOG_ERROR(std::string("convert: texture format mismatch, ") +
                   std::to_string(desc.Format) +
@@ -424,6 +452,23 @@ private:
                 std::to_string(frame_->format));
       return false;
     }
+  }
+
+  bool convert_hdr(void *texture, ID3D11Texture2D *p010,
+                   const D3D11_TEXTURE2D_DESC &desc) {
+    if (desc.Format != DXGI_FORMAT_P010) {
+      LOG_ERROR(std::string("convert_hdr: texture format mismatch, ") +
+                std::to_string(desc.Format) +
+                " != " + std::to_string(DXGI_FORMAT_P010));
+      return false;
+    }
+    if (!native_->BgraToNv12((ID3D11Texture2D *)texture, p010, width_, height_,
+                             DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020,
+                             DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020)) {
+      LOG_ERROR(std::string("convert_hdr: RGB10 PQ -> P010 failed"));
+      return false;
+    }
+    return true;
   }
 
   bool set_hwframe_ctx() {
@@ -492,6 +537,28 @@ FFmpegVRamEncoder *ffmpeg_vram_new_encoder(void *handle, int64_t luid,
     LOG_ERROR(std::string("new FFmpegVRamEncoder failed, ") + std::string(e.what()));
   } catch (...) {
     LOG_ERROR("ffmpeg_vram_new_encoder: unknown exception");
+  }
+  return NULL;
+}
+
+FFmpegVRamEncoder *ffmpeg_vram_new_encoder_hdr(void *handle, int64_t luid,
+                                               DataFormat dataFormat, int32_t width,
+                                               int32_t height, int32_t kbs,
+                                               int32_t framerate, int32_t gop) noexcept {
+  try {
+    std::unique_ptr<FFmpegVRamEncoder, decltype(&ffmpeg_vram_destroy_encoder)> encoder(
+        new FFmpegVRamEncoder(handle, luid, dataFormat, width,
+                              height, kbs, framerate, gop, true),
+        ffmpeg_vram_destroy_encoder);
+    if (encoder) {
+      if (encoder->init()) {
+        return encoder.release();
+      }
+    }
+  } catch (const std::exception &e) {
+    LOG_ERROR(std::string("new HDR FFmpegVRamEncoder failed, ") + std::string(e.what()));
+  } catch (...) {
+    LOG_ERROR("ffmpeg_vram_new_encoder_hdr: unknown exception");
   }
   return NULL;
 }
